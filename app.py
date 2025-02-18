@@ -1,113 +1,240 @@
 import streamlit as st
-from streamlit_elements import elements, mui, html
 import pandas as pd
-import plotly.express as px
 import numpy as np
+import plotly.express as px
 from google.cloud import storage
+from scipy import stats
 from sklearn.preprocessing import LabelEncoder
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.ensemble import RandomForestRegressor
-from scipy import stats
 import io
 
 # -------------------------------
-# 1. LOAD DATA FROM GOOGLE CLOUD STORAGE
+# 1. APPLY CUSTOM THEME
 # -------------------------------
-def load_excel_from_gcs(bucket_name, file_name):
+def apply_custom_theme():
+    st.set_page_config(
+        page_title="CompCare Rate Insights",
+        page_icon="🩺",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    st.markdown(
+        """
+        <style>
+            /* Global background color */
+            html, body, [data-testid="stAppViewContainer"] {
+                background-color: #f3f6fc !important;
+                color: #000 !important;
+            }
+            /* Sidebar customization */
+            [data-testid="stSidebar"] {
+                background-color: #1f3c88 !important; /* a deep bluish color */
+                color: white !important;
+            }
+            /* Top bar */
+            .top-bar {
+                background: linear-gradient(135deg, #4285F4, #34A853);
+                color: #fff;
+                padding: 1rem;
+                text-align: center;
+                border-radius: 10px;
+                margin-bottom: 20px;
+            }
+            .brand-name {
+                font-size: 2rem;
+                font-weight: 700;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+apply_custom_theme()
+
+# -------------------------------
+# 2. TOP BAR
+# -------------------------------
+st.markdown('<div class="top-bar"><span class="brand-name">CompCare Rate Insights</span></div>', unsafe_allow_html=True)
+
+# -------------------------------
+# 3. LOAD DATA FROM GCS (FIXED FOR XLSX)
+# -------------------------------
+def load_xlsx_from_gcs(bucket_name, file_name):
+    """
+    Downloads an .xlsx file from GCS and returns a DataFrame.
+    """
     client = storage.Client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(file_name)
-    data = blob.download_as_bytes()
-    return pd.read_excel(io.BytesIO(data))
+    data_bytes = blob.download_as_bytes()  # download as bytes to handle Excel
+    return pd.read_excel(io.BytesIO(data_bytes))
 
-# Load data
+# Attempt to load data from your bucket
 bucket_name = "healthcare_data_clean"
-travel_df = load_excel_from_gcs(bucket_name, "travel_cleaned_data8.xlsx")
-local_df = load_excel_from_gcs(bucket_name, "local_cleaned_data8.xlsx")
-gsa_df = load_excel_from_gcs(bucket_name, "FY2025_ZipCodeFile_080824 (2).xlsx")
 
-data = pd.concat([travel_df, local_df], ignore_index=True)
-data['City'] = data['City'].str.title()
-data['State'] = data['State'].str.title()
-data['location'] = data['City'] + ', ' + data['State']
+try:
+    travel_df = load_xlsx_from_gcs(bucket_name, "travel_cleaned_data8.xlsx")
+    st.success("Loaded travel_cleaned_data8.xlsx")
+except Exception as e:
+    st.error(f"Failed to load travel data: {e}")
+    travel_df = pd.DataFrame()
 
-# Remove outliers
-if 'Weekly Pay' in data.columns:
-    data = data[(np.abs(stats.zscore(data['Weekly Pay'])) < 3)]
+try:
+    local_df = load_xlsx_from_gcs(bucket_name, "local_cleaned_data8.xlsx")
+    st.success("Loaded local_cleaned_data8.xlsx")
+except Exception as e:
+    st.error(f"Failed to load local data: {e}")
+    local_df = pd.DataFrame()
 
-# Encode job titles and cities
-if 'Job Title' in data.columns:
-    data['job_title_encoded'] = LabelEncoder().fit_transform(data['Job Title'].astype(str))
-if 'City' in data.columns:
-    data['city_encoded'] = LabelEncoder().fit_transform(data['City'].astype(str))
+try:
+    gsa_df = load_xlsx_from_gcs(bucket_name, "FY2025_ZipCodeFile_080824 (2).xlsx")
+    st.success("Loaded FY2025_ZipCodeFile_080824 (2).xlsx")
+except Exception as e:
+    st.error(f"Failed to load GSA data: {e}")
+    gsa_df = pd.DataFrame()
+
+# Combine travel & local
+combined_df = pd.concat([travel_df, local_df], ignore_index=True)
 
 # -------------------------------
-# 2. STREAMLIT CLOUD UI
+# 4. BASIC DATA CLEANING
 # -------------------------------
-st.set_page_config(page_title="CompCare Rate Insights", layout="wide")
+if not combined_df.empty:
+    # Title-case city/state if columns exist
+    if "City" in combined_df.columns:
+        combined_df["City"] = combined_df["City"].astype(str).str.title()
+    if "State" in combined_df.columns:
+        combined_df["State"] = combined_df["State"].astype(str).str.title()
 
-with elements("main"):
-    with mui.Grid(container=True, spacing=3):
+    # Remove outliers on Weekly Pay if it exists
+    if "Weekly Pay" in combined_df.columns:
+        combined_df = combined_df[combined_df["Weekly Pay"].notnull()]
+        combined_df = combined_df[(np.abs(stats.zscore(combined_df["Weekly Pay"])) < 3)]
 
-        with mui.Grid(item=True, xs=6):
-            mui.Card(
-                mui.CardContent(
-                    mui.Typography("CompCare Rate Insights", variant="h4"),
-                    mui.Typography("Healthcare Bill Rate Analysis Tool", variant="body2")
-                )
-            )
+    # Encode job/city
+    if "Job Title" in combined_df.columns:
+        combined_df["job_title_encoded"] = LabelEncoder().fit_transform(combined_df["Job Title"].astype(str))
+    if "City" in combined_df.columns:
+        combined_df["city_encoded"] = LabelEncoder().fit_transform(combined_df["City"].astype(str))
 
-        with mui.Grid(item=True, xs=6):
-            mui.Card(
-                mui.CardContent(
-                    mui.Typography("Subscription Status", variant="h6"),
-                    mui.LinearProgress(value=50),
-                    mui.Typography("50% of quota used", variant="body2")
-                )
-            )
-
-# Sidebar inputs
+# -------------------------------
+# 5. SIDEBAR CONFIG
+# -------------------------------
 st.sidebar.header("Configuration")
-worker_type = st.sidebar.radio("Select Worker Type", ["Travel", "Local"])
-markup_percentage = st.sidebar.slider("Enter Markup (%)", 0, 100, 60)
-weekly_hours = st.sidebar.number_input("Enter Weekly Hours", 20, 60, 36)
+markup_percentage = st.sidebar.slider("Markup (%)", 0, 100, 60)
+weekly_hours = st.sidebar.number_input("Weekly Hours", 20, 60, 36)
 
-# Job title and state selection
-data['Job Title'] = data['Job Title'].fillna('Unknown')
-job_title = st.selectbox("Select Job Title", data['Job Title'].unique())
-state = st.selectbox("Select State", data['State'].unique())
+# Worker Type selection if it exists, else fallback
+if "Worker Type" in combined_df.columns:
+    worker_types = combined_df["Worker Type"].dropna().unique().tolist()
+    selected_worker_type = st.sidebar.selectbox("Worker Type", worker_types)
+else:
+    selected_worker_type = "Travel"  # fallback
+
+# Job Title selection
+job_titles = combined_df["Job Title"].dropna().unique().tolist() if "Job Title" in combined_df.columns else []
+if job_titles:
+    selected_job_title = st.sidebar.selectbox("Job Title", job_titles)
+else:
+    selected_job_title = None
+
+# State selection
+states = combined_df["State"].dropna().unique().tolist() if "State" in combined_df.columns else []
+if states:
+    selected_state = st.sidebar.selectbox("Select State", states)
+else:
+    selected_state = None
 
 # -------------------------------
-# 3. PREDICT BILL RATES
+# 6. FILTER & MODEL
 # -------------------------------
-def calculate_bill_rate(row, markup, hours):
-    travel_hourly_pay = row['Weekly Pay'] / hours
-    stipend_hourly = row.get('Hourly Stipend', 0)
+st.subheader("Data & Predictions")
+
+# Filter
+if not combined_df.empty and selected_worker_type and selected_job_title and selected_state:
+    filtered_data = combined_df[
+        (combined_df["Worker Type"] == selected_worker_type) &
+        (combined_df["Job Title"] == selected_job_title) &
+        (combined_df["State"] == selected_state)
+    ]
+else:
+    filtered_data = pd.DataFrame()
+
+st.write("Filtered Data (preview):", filtered_data.head())
+
+# Simple ML Approach (if data is enough)
+if len(filtered_data) < 5:
+    model = RandomForestRegressor(n_estimators=50)
+else:
+    model = KNeighborsRegressor(n_neighbors=min(20, len(filtered_data)-1))
+
+def calculate_bill_rate(weekly_pay, stipend_hourly, markup, hours):
+    """
+    Basic Travel Bill Rate formula.
+    """
+    travel_hourly_pay = weekly_pay / hours
     if travel_hourly_pay <= stipend_hourly:
         return None
     return (travel_hourly_pay - stipend_hourly) * (1 + markup / 100) + stipend_hourly
 
-filtered_df = data[(data['Worker Type'] == worker_type) &
-                   (data['Job Title'] == job_title) &
-                   (data['State'] == state)]
+if st.button("Predict & Calculate Rates"):
+    if filtered_data.empty:
+        st.error("No data for this selection.")
+    else:
+        # Ensure columns exist
+        if "Weekly Pay" in filtered_data.columns:
+            X = filtered_data[["job_title_encoded", "city_encoded"]].dropna()
+            y = filtered_data["Weekly Pay"].dropna()
 
-if filtered_df.empty:
-    st.warning("No data found for the selected filters.")
-else:
-    filtered_df['Bill Rate'] = filtered_df.apply(lambda x: calculate_bill_rate(x, markup_percentage, weekly_hours), axis=1)
+            # Fit Model
+            if not X.empty and len(X) == len(y):
+                model.fit(X, y)
+                predicted_weekly_pay = model.predict(X)
+                if "Hourly Stipend" not in filtered_data.columns:
+                    filtered_data["Hourly Stipend"] = 0
 
-    st.subheader("Bill Rate Distribution")
-    fig = px.scatter(filtered_df, x='City', y='Bill Rate', color='Job Title', title='Bill Rate Distribution')
-    st.plotly_chart(fig)
+                # Apply formula
+                bill_rates = []
+                for i, pay in enumerate(predicted_weekly_pay):
+                    row_index = X.index[i]
+                    stipend = filtered_data.loc[row_index, "Hourly Stipend"]
+                    br = calculate_bill_rate(pay, stipend, markup_percentage, weekly_hours)
+                    bill_rates.append(br)
 
-    # Display summary metrics
-    st.write(f"Min: ${filtered_df['Bill Rate'].min():.2f}, Avg: ${filtered_df['Bill Rate'].mean():.2f}, Max: ${filtered_df['Bill Rate'].max():.2f}")
+                # Merge predictions back
+                filtered_data["predicted_weekly_pay"] = pd.Series(predicted_weekly_pay, index=X.index)
+                filtered_data["bill_rate"] = pd.Series(bill_rates, index=X.index)
+
+                # Show results
+                st.write("**Results**:")
+                st.write(filtered_data[["Job Title", "City", "State", "predicted_weekly_pay", "bill_rate"]].head())
+
+                if filtered_data["bill_rate"].notnull().any():
+                    fig = px.scatter(
+                        filtered_data.dropna(subset=["bill_rate"]),
+                        x="City",
+                        y="bill_rate",
+                        color="Job Title",
+                        title="Bill Rate Distribution"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    st.write(f"Min: ${filtered_data['bill_rate'].min():.2f}, "
+                             f"Avg: ${filtered_data['bill_rate'].mean():.2f}, "
+                             f"Max: ${filtered_data['bill_rate'].max():.2f}")
+                else:
+                    st.warning("No valid bill rates calculated.")
+            else:
+                st.warning("Check if features or weekly_pay are missing.")
+        else:
+            st.warning("No 'Weekly Pay' column found in data.")
 
 # -------------------------------
-# 4. EXPORT OPTIONS
+# 7. OPTIONAL EXPORT
 # -------------------------------
-if not filtered_df.empty:
-    st.download_button("Download Detailed Summary", filtered_df.to_csv(index=False), "detailed_bill_rates.csv", "text/csv")
-    st.download_button("Download Raw Data", data.to_csv(index=False), "raw_data.csv", "text/csv")
+if not filtered_data.empty:
+    csv = filtered_data.to_csv(index=False).encode("utf-8")
+    st.download_button("Download Filtered Data", csv, file_name="filtered_data.csv", mime="text/csv")
+EOF
 
-st.success("App ready for deployment on Streamlit Cloud!")
