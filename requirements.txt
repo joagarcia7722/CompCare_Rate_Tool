@@ -1,0 +1,7 @@
+streamlit
+streamlit-elements
+pandas
+numpy
+scikit-learn
+plotly
+google-cloud-storage
